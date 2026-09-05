@@ -23,3 +23,6 @@ server.log
 *.ogg
 *.flac
 coverage/
+
+# Local meeting recordings, transcripts, models, build and machine settings
+.local/

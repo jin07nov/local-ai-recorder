@@ -16,16 +16,29 @@
 
 import { defineConfig } from "vite"
 import react from "@vitejs/plugin-react"
+import { fileURLToPath } from "node:url"
 
 // Dev-only config: Vite serves the UI on :5173 and proxies API routes to the
 // Python backend on :3000. In production (start.sh --prod) the backend serves
 // the built frontend/dist itself, so this proxy is never involved.
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      input: {
+        translator: fileURLToPath(new URL("./index.html", import.meta.url)),
+        meeting: fileURLToPath(new URL("./meeting.html", import.meta.url)),
+      },
+    },
+  },
   server: {
     host: "0.0.0.0",
     port: 5173,
     proxy: {
+      "/api/meetings": {
+        target: "http://127.0.0.1:3001",
+        changeOrigin: false,
+      },
       "/api": {
         target: "http://localhost:3000",
         changeOrigin: true,

@@ -2,6 +2,14 @@
 
 # Gemma Translator
 
+## Local AI Recorder: Meeting transcription
+
+This fork adds a separate meeting recorder while retaining the original translator.
+On a 64-bit Raspberry Pi, run `bash setup-meeting.sh --model base`, then
+`bash start-meeting.sh` and open `http://localhost:3001` on the Pi.
+See [会議レコーダーの導入・操作・実機 E2E 手順](docs/meeting-recorder.md) for microphone setup,
+offline operation, recovery, and long-recording validation. Live translation and summary generation are planned follow-ups.
+
 This repo was built with the assistance of [Google Antigravity](https://antigravity.google/) and includes code to run an on-device, fully offline voice translator powered by [Gemma 4](https://ai.google.dev/gemma/docs/core) and [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-lm). This project features a web frontend optimized for small handheld displays (e.g., 480x320) and a Python API server (`http.server`) that communicates with Gemma. Text-to-speech is powered by [Moonshine](https://github.com/moonshine-ai/moonshine).
 
 https://github.com/user-attachments/assets/343072ce-dc78-44a7-a783-99312845cabe

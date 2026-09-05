@@ -1,7 +1,7 @@
 # SPEC
 
 > 現状と、ゴールに向けた設計の記録。**採用方針・設計案は実装済みを意味しない。**
-> バージョンの正本は依存定義・ロックファイル。調査基準は 2026-09-05、HEAD `b194f30`。
+> バージョンの正本は依存定義・ロックファイル・導入スクリプト。初期調査は 2026-09-05、HEAD `b194f30`。P1 の実装を同日追記。
 
 ## 現在の実装
 
@@ -15,7 +15,11 @@
 | TTS | `moonshine-voice` の `TextToSpeech`。STT と同じ Python パッケージを利用 | [server.py](../backend/server.py)、[requirements.txt](../backend/requirements.txt) |
 | 言語 | UI・STT・TTS は `ar` / `en` / `es` / `ja` / `zh` / `ko`。`de` は未登録。未対応言語は既存 STT / TTS で英語にフォールバックする | [TranslatorApp.jsx](../frontend/src/TranslatorApp.jsx)、[server.py](../backend/server.py) |
 | 起動・配備 | 開発 UI は 5173。本番は Python が `frontend/dist/` を配信。systemd / Chromium kiosk の配備スクリプトあり | [start.sh](../start.sh)、[deploy-pi.sh](../deploy-pi.sh) |
-| 会議機能 | whisper.cpp、会議録音の永続化、会議一覧、議事録生成はいずれも未実装 | 上記ソースの初期調査 |
+| 会議録音 | Pi の `arecord` → 逐次 PCM 保存 → 停止後 WAV 確定。会議一覧・中断復旧・削除 | [meetings.py](../backend/meetings.py) |
+| 会議 STT | whisper.cpp CLI を別プロセスで呼び、区間ごとに原文・時刻を保存。キャンセル・再開に対応 | [stt.py](../backend/stt.py)、[meetings.py](../backend/meetings.py) |
+| 会議 UI / API | ポート3001の独立サーバー。標準 Python のみで起動。会議 UI は Vite の別エントリとしてビルド | [meeting_server.py](../backend/meeting_server.py)、[MeetingApp.jsx](../frontend/src/meeting/MeetingApp.jsx) |
+| 会議導入 | whisper.cpp `b4938` のソースビルド、多言語 `base` / `small`、UI の構築。既存サービス設定は維持 | [setup-meeting.sh](../setup-meeting.sh)、[start-meeting.sh](../start-meeting.sh) |
+| 後続機能 | ドイツ語の選択・ライブ翻訳・要約・TODO 生成は未実装 | P2 / P3 の計画 |
 
 既存起動手順は [README.md](../README.md) を参照する。記載された導入手順は主に Linux / macOS 向けで、
 今回の Windows 作業環境で Pi の動作を検証したわけではない。
@@ -35,7 +39,7 @@ Moonshine の公式説明は低遅延の音声インターフェースを重視�
 whisper.cpp はファイル入力・タイムスタンプ・VAD を提供しており、会議の処理基盤として検証する。
 出典: [Moonshine](https://github.com/moonshine-ai/moonshine)、[whisper.cpp](https://github.com/ggml-org/whisper.cpp)。
 
-## 目標の処理構成（未実装）
+## 処理構成（Translator / P1 は実装、P2 / P3 は計画）
 
 ```text
 Translator Mode
@@ -55,29 +59,45 @@ P3（後続）
   保存済み文字起こし → Gemma（分割要約 → 全体統合）→ 議事録・TODO
 ```
 
-### STT の境界案
+### STT の境界（P1 実装）
 
-- 共通の役割を `SpeechToText`、実装を `MoonshineSTT` / `WhisperCppSTT` とする案。
-- 入力は音声・言語・処理オプション。音声のパス / PCM の共通表現は P1 で確定する。
-- 結果は全文、言語、エンジン・モデル情報、任意のセグメント（開始秒・終了秒・テキスト）を持つ案。
-- タイムスタンプの有無は能力差として扱う。既存 Moonshine API のテキストから時刻を捏造しない。
-- 既存 `POST /api/stt` の入力・`text` 応答を維持するアダプターを検討する。
-- モードごとの既定は既存 Translator Mode = `moonshine`、会議・新規のライブ翻訳の入力 = `whisper`。指定方法は P1 で確定する。
-  ユーザー提案の `STT_ENGINE=moonshine|whisper` は未実装の設定案であり、現時点では切り替わらない。
-  全体設定1つで両モードが意図せず切り替わらないよう、モード指定との優先順位も定義する。
-- whisper.cpp はまず CLI を別プロセスから呼ぶ方式を候補にする。Python binding 採用は未決定。
-  終了コード・出力解析・タイムアウト・キャンセル・モデル未配置を境界で扱う。
+- `SpeechToText.transcribe(audio_path, language)` の入力は 16 kHz / mono / 16-bit PCM WAV。形式・空音声・データ途切れを検査する。
+- `Transcription` は `text` / `language` / `engine` / `segments`。各区間は `start` / `end`（秒）/ `text`。モデル情報は会議メタデータ・処理識別情報へ保存する。
+- `MoonshineSTT.transcribe_samples` は既存の Float32 PCM をそのまま既存キャッシュ・ロックへ渡す。既存 `POST /api/stt` の入力と `{"text": ...}` 応答は維持し、時刻は生成しない。
+- Translator Mode は Moonshine、会議は whisper.cpp と固定する。全体を切り替える `STT_ENGINE` は導入しない。
+- `WhisperCppSTT` は `whisper-cli -m ... -f ... -l ... -t ... -oj -of ... -np -ng` をシェルを介さず起動する。翻訳オプション `-tr` は指定せず原言語を認識する。
+- `b4938` の JSON `transcription[].offsets.from/to` はミリ秒として読み、秒へ変換する。終了コード・モデル欠落・結果欠落・時刻不正・タイムアウト・キャンセルを扱う。
+- 区間推論のタイムアウトとキャンセル時は子プロセスを終了する。モデル出力は通常ログへ出さず、保存 JSON を読み込む。
+- 設定の正本は `.local/meeting.env`。`start-meeting.sh` が読み込み、Python は環境変数を使用する。`--host` / `--port` の明示引数は環境変数より優先する。
+  会議用の設定名・初期値は [導入手順](../docs/meeting-recorder.md) を参照する。
 
-### 長時間録音・処理ジョブ
+### 長時間録音・処理ジョブ（P1 実装）
 
-- ブラウザから逐次送信する方式と、Pi バックエンドで直接録音する方式を P1 で比較する。
-- 保存のチャンクと推論のチャンクを区別する。VAD は文字起こし時に評価し、保存音声の無音を不可逆に捨てない。
-- 分割境界の発話欠落・重複を検証し、セグメント時刻を録音全体の開始からの時刻に戻す。
-- 長時間処理を1本の HTTP リクエストの待機に依存させず、ジョブ状態・進捗・失敗理由を取得できるようにする。
-- P1 の状態は録音中 / 保存済み / 文字起こし中 / 完了 / 失敗・中断を区別する案。
-  P2 では録音・STT・翻訳が同時に進むため状態を別々に持ち、翻訳失敗を会議全体の失敗にしない。
-  再実行は保存済み音声・文字起こしから行い、録音のやり直しを必須にしない。
-- Pi の資源を考慮し、初期案は1会議ずつ処理する。STT と Gemma の同時常駐・逐次ロードは実測で選ぶ。
+- 操作ブラウザの接続やマイク許可に依存しないよう、Pi のバックエンド録音を採用した。`arecord` の raw S16_LE / 16 kHz / mono を毎秒程度ファイルへ flush / fsync する。ブラウザ RAM に全音声を蓄積しない。
+- 停止時に PCM から WAV をストリーム書き込みする。復旧用 PCM は保持し、起動時には中断状態を復旧する。空音声・容量不足は会議ごとのエラーにし、他の会議の操作を妨げない。
+- 録音時間の初期上限は7200秒、設定可能範囲は1〜21600秒。空き容量の下限256 MiBに加えて、WAV 確定分を予約する。媒体故障や外部プロセスが容量を消費した場合まで保証しない。
+- WAV を既定300秒の連続区間に分割する。音声サンプルを重複・欠落させず、STT の区間時刻を全体時刻に戻す。音声上の境界発話の認識品質は実機評価待ち。オーバーラップ・重複テキストの統合は未導入。
+- VAD は既定オフ。`WHISPER_VAD_MODEL` を指定した場合だけ CLI の `--vad -vm` を使う。VAD の有無によらず原音の無音は保存する。
+- 区間結果を原子的に保存して再開する。音声のサイズ・更新時刻、モデルと CLI のパス・サイズ・更新時刻、言語・区間長・スレッド数などが変わると別の処理として再生成する。
+- 1サーバーで録音または文字起こしを1件ずつ実行する。Gemma・Moonshine は会議サーバーからロードしない。保存先の OS ファイルロックで二重起動を防ぐ。
+- 状態は `recording` / `stopping` / `recorded` / `transcribing` / `completed` / `interrupted` / `failed`。処理はワーカースレッドで進め、HTTP はすぐに応答する。
+- UI は1秒間隔で状態・区間結果をポーリングし、接続断や画面再読込後も一覧から復帰する。P2 では録音・STT・翻訳を同時進行できる状態管理へ拡張する必要がある。
+
+### 会議 API と起動（P1 実装）
+
+| 操作 | API |
+|---|---|
+| 利用準備・一覧 | `GET /api/meetings/status`、`GET /api/meetings` |
+| 録音開始 | `POST /api/meetings`、JSON `title` / `language` |
+| 会議詳細・原文区間 | `GET /api/meetings/<id>` |
+| 停止・文字起こし・中断 | `POST /api/meetings/<id>/stop` / `transcribe` / `cancel` |
+| ダウンロード | `GET /api/meetings/<id>/audio.wav` / `transcript.md` / `transcript.json` |
+| 削除 | `POST /api/meetings/<id>/delete`。UI で確認し、処理中の対象は拒否 |
+
+変更操作は JSON、本文16 KiB以下、ブラウザでは同一 Origin に限定する。既定はループバック接続。
+Pi の `http://localhost:3001` から使用する。別PCはSSHポート転送で接続する。
+既存翻訳は3000、Gemmaは9379のまま。元の `start.sh` / `deploy-pi.sh` とサービス設定は変更しない。
+UI 開発時は Vite の `/meeting.html` を使い、`/api/meetings` だけ3001へプロキシする。
 
 ### ドイツ語入力・ライブ翻訳・表示（P2 / 未実装）
 
@@ -105,27 +125,26 @@ P3（後続）
   許容する STT 遅延の増加とライブ翻訳の更新間隔は P2 の実測で定める。目標を超える場合は STT を優先する。
 - 「ライブ」は会議中に訳文が順次現れることを指す。翻訳停止時の耐障害性に加え、通常時の継続表示も受け入れ条件にする。
 
-### 保存構成案
+### 保存構成（P1 実装）
 
-`DATA_DIR` は将来導入する設定名の案。次は構成例で、保存先やファイルはまだ存在しない。
-`/data` 固定にはせず、OS・実行ユーザー・systemd の書き込み権限を踏まえて決める。
+`MEETING_DATA_DIR` の既定はリポジトリ内 `.local/meetings`。会議 ID は UUID の32桁 hex で、日時は時差付きでメタデータへ保存する。
 
 ```text
-<DATA_DIR>/
-  2026-09-05_0900_<id>/
-    audio.wav          # 保存音声（チャンクからの最終結合も候補）
-    transcript.md      # P1: タイムスタンプ付きの原文
-    translation.ja.md  # P2: 区間に対応する日本語訳の保存先候補
-    summary.md         # P3: 3行要約・決定事項・TODO・担当者・未決事項
-    metadata.json      # ID・開始日時/時差・言語・モデル・状態などの候補
+<MEETING_DATA_DIR>/
+  .lock
+  <uuid>/
+    audio.pcm          # マイクから逐次保存する復旧用音声
+    audio.wav          # 停止後の WAV（CLI 取り込み時も同形式）
+    transcript.md      # タイムスタンプ付きの原文
+    transcript.json    # 原文区間 ID・秒単位の時刻・処理識別情報
+    metadata.json      # ID・開始日時/時差・言語・モデル・状態・進捗
+    chunks/<処理条件の識別子>/  # 完了区間の JSON、処理中の一時 WAV
 ```
 
-- 日時に一意な ID を加えて同時刻の衝突を避ける。日時にはタイムゾーン情報を残す。
-- 処理用音声は 16 kHz / mono / 16-bit PCM WAV を初期候補とする。
-  現状の STT 入力は生 Float32 PCM なので、拡張子の変更だけで WAV にはならない。
-  公式 CLI の案内も 16-bit WAV への変換を示している。[whisper.cpp Quick start](https://github.com/ggml-org/whisper.cpp#quick-start)
-- 逐次保存の一時ファイル・確定方法、容量不足・異常終了時の復旧、保持・削除の操作は P1 で確定する。
-- 保存先は静的 UI 配信ディレクトリの外に置く。実データを置く前に保存先全体を Git の追跡対象外にする。
+- 音声は 16 kHz / mono / 16-bit PCM。マイク録音では復旧用 PCM と WAV の両方を保持し、計約230 MB/時。CLI 取り込みでは WAV のみを保持する。
+- 原文・メタデータは一時ファイルへの書き込み・fsync 後に置換する。確定済み区間は推論失敗・中断後も残す。会議の削除は音声・区間結果を含む全体を対象とする。
+- 保存先は静的 UI 配信ディレクトリの外。初期保存先・設定・モデルを含む `.local/` 全体を Git から除外した。`MEETING_DATA_DIR` を変更する場合も実データを追跡対象にしない。
+- `translation.ja.md`（P2）、`summary.md`（P3）は後続の案であり、まだ作成しない。
 
 ### 要約・議事録（P3 / 後続）
 
@@ -150,7 +169,6 @@ P3（後続）
 
 ## 未確定事項
 
-録音方式、ジョブ API、STT の正確な型・設定名、保存仕様、whisper.cpp の版・VAD・量子化、
-Gemma の入力長とロード方針、ライブ更新の配信方式、翻訳キューと資源制御、
-Pi での許容 STT 遅延・翻訳更新間隔・品質基準は各段階で決める。
-今回、新しいライブラリやモデルは導入していない。
+Pi での VAD・分割境界・量子化・最終モデル、Gemma の入力長とロード方針、
+P2 のライブ更新方式・翻訳キュー・資源制御、許容 STT 遅延・翻訳更新間隔・品質基準は各段階で決める。
+ローカル自動テストと Windows CLI の短音声テストは成功。Pi の導入実行・実マイク・日本語品質・長時間性能・画面実操作は未検証。

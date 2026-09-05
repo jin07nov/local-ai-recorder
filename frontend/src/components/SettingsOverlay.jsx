@@ -84,6 +84,14 @@ export default function SettingsOverlay({
         </button>
       </header>
       <div className="overlay-body">
+        <div className="form-group">
+          <a
+            className="overlay-btn"
+            href={`http://${window.location.hostname}:3001/`}
+          >
+            会議レコーダーを開く ↗
+          </a>
+        </div>
         <div className="form-group" style={{ marginBottom: "10px" }}>
           <label>System Volume</label>
           <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>

@@ -29,6 +29,7 @@ import ssl
 
 import threading
 from collections import OrderedDict
+from stt import MoonshineSTT
 
 # Multilingual STT via Moonshine.
 # Language is fixed at recognizer construction, so we lazily build (and cache) one
@@ -243,10 +244,8 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             # The browser sends a raw Float32Array buffer
             audio_np = np.frombuffer(raw_data, dtype=np.float32)
 
-            with _stt_lock:
-                recognizer = get_stt_recognizer(language)
-                transcript = recognizer.transcribe_without_streaming(audio_np, 16000)
-            text = " ".join([line.text for line in transcript.lines])
+            transcript = MoonshineSTT(get_stt_recognizer, _stt_lock).transcribe_samples(audio_np, language)
+            text = transcript.text
             print(f"[STT] Transcribed: {text}")
 
             self.send_response(200)
