@@ -32,6 +32,7 @@ class MeetingConfig:
     device: str = "default"
     threads: int = 3
     chunk_seconds: int = 300
+    live_chunk_seconds: int = 10
     timeout: int = 1800
     max_seconds: int = 7200
     reserve_bytes: int = 256 * 1024 * 1024
@@ -48,6 +49,7 @@ class MeetingConfig:
         for field, env, low, high in (
             ("threads", "WHISPER_THREADS", 1, 32),
             ("chunk_seconds", "MEETING_CHUNK_SECONDS", 10, 600),
+            ("live_chunk_seconds", "MEETING_LIVE_CHUNK_SECONDS", 3, 60),
             ("timeout", "WHISPER_TIMEOUT_SECONDS", 1, 14400),
             ("max_seconds", "MEETING_MAX_SECONDS", 1, 21600),
         ):
@@ -124,6 +126,12 @@ class MeetingService:
         self.thread = None
         self.process = None
         self.cancel_event = threading.Event()
+        self.capture_finished = threading.Event()
+        self.capture_finished.set()
+        self.live_wakeup = threading.Event()
+        self.live_cancel = threading.Event()
+        self.live_thread = None
+        self.live_running = False
         self.closed = False
         self.load_warnings = []
         try:
@@ -154,7 +162,13 @@ class MeetingService:
                 self.records[record["id"]] = record
                 if record["status"] in {"recording", "stopping", "transcribing"}:
                     record["status"] = "interrupted"
-                    record["error"] = "前回の処理が中断しました。保存済み音声から再実行できます。"
+                    if record.get("live_transcription"):
+                        if record.get("capture_status") == "recording":
+                            record["error"] = "前回の録音が中断しました。保存済み音声から再実行できます。"
+                        record.update(capture_status="stopped", transcription_status="paused",
+                                      transcription_error="前回の文字起こしが中断しました。再開できます。")
+                    else:
+                        record["error"] = "前回の処理が中断しました。保存済み音声から再実行できます。"
                     try:
                         if not (directory / "audio.wav").exists() and (directory / "audio.pcm").is_file():
                             self._finalize_audio(record)
@@ -188,6 +202,9 @@ class MeetingService:
             record["has_audio"] = (self._directory(meeting_id) / "audio.wav").is_file()
             raw = self._directory(meeting_id) / "audio.pcm"
             record["can_transcribe"] = record["has_audio"] or (raw.is_file() and raw.stat().st_size >= 2)
+            if record.get("live_transcription"):
+                record["transcription_lag_seconds"] = max(0, record["duration_seconds"] - record.get("transcribed_seconds", 0))
+                record["progress"]["total"] = math.ceil(record["duration_seconds"] / record["live_chunk_seconds"])
             return record
 
     def _new(self, title, language):
@@ -209,9 +226,11 @@ class MeetingService:
         if shutil.disk_usage(self.root).free < self.config.reserve_bytes + extra:
             raise MeetingError("保存容量が不足しています。不要な会議を削除してから再実行してください。", 507)
 
-    def start(self, title, language):
+    def start(self, title, language, live=False):
         with self.lock:
             self._idle()
+            if not isinstance(live, bool):
+                raise MeetingError("録音中の文字起こし設定は true / false にしてください。")
             self._space()
             command = self.recorder_command
             if command is None:
@@ -222,17 +241,28 @@ class MeetingService:
             record = self._new(title, language)
             record["status"] = "recording"
             record["audio_device"] = self.config.device
+            record.update(live_transcription=live, capture_status="recording")
+            if live:
+                record.update(live_chunk_seconds=self.config.live_chunk_seconds,
+                              transcription_status="waiting", transcription_error=None, transcribed_seconds=0)
             self._save(record)
             try:
                 self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             except OSError as error:
-                record.update(status="failed", error="マイク録音を開始できませんでした。arecord と音声機器を確認してください。")
+                record.update(status="failed", capture_status="failed",
+                              error="マイク録音を開始できませんでした。arecord と音声機器を確認してください。")
+                if live:
+                    record.update(transcription_status="failed", transcription_error=None)
                 self._save(record)
                 raise MeetingError(record["error"], 503) from error
             self.active = record["id"]
             self.cancel_event = threading.Event()
+            self.capture_finished.clear()
+            self.live_wakeup.clear()
             self.thread = threading.Thread(target=self._capture, args=(record,), daemon=True)
             self.thread.start()
+            if live:
+                self._launch_live(record)
             return copy.deepcopy(record)
 
     def stop(self, meeting_id):
@@ -285,6 +315,7 @@ class MeetingService:
                     with self.lock:
                         record["duration_seconds"] = received / BYTES_PER_SECOND
                         self._save(record)
+                    self.live_wakeup.set()
                     if received >= self.config.max_seconds * BYTES_PER_SECOND:
                         self.cancel_event.set()
                         record["notice"] = "録音時間の上限に達したため保存しました。"
@@ -312,14 +343,20 @@ class MeetingService:
                 except Exception as exception:
                     record.update(status="failed", error=str(exception))
                 record["recorder_exit_code"] = process.returncode
+                record["capture_status"] = "failed" if record["error"] else "stopped"
                 if record["error"]:
                     record["error"] += f"\n録音デバイス: {self.config.device}"
                     if diagnostic_text:
                         record["error"] += f"\narecord（終了コード {process.returncode}）: {diagnostic_text}"
                 try:
+                    self.capture_finished.set()
+                    self.live_wakeup.set()
+                    if record.get("live_transcription"):
+                        self._settle_live(record)
                     self._save(record)
                 finally:
-                    self.active = None
+                    if not self.live_running:
+                        self.active = None
                     self.process = None
 
     def _finalize_audio(self, record):
@@ -372,14 +409,27 @@ class MeetingService:
 
     def transcribe(self, meeting_id):
         with self.lock:
-            self._idle()
             record = self._get(meeting_id)
+            if self.active == meeting_id and record.get("live_transcription") and not self.capture_finished.is_set():
+                if self.closed:
+                    raise MeetingError("サーバーを終了しています。", 503)
+                if self.live_running:
+                    raise MeetingError("文字起こしはすでに動作中です。", 409)
+                self._launch_live(record)
+                return copy.deepcopy(record)
+            self._idle()
             self.engine.check()
             directory = self._directory(meeting_id)
             if not (directory / "audio.wav").exists() and (directory / "audio.pcm").exists():
                 self._finalize_audio(record)
             if not (directory / "audio.wav").exists():
                 raise MeetingError("文字起こしに使える保存音声がありません。", 409)
+            if record.get("live_transcription"):
+                self.active = meeting_id
+                self.capture_finished.set()
+                self._launch_live(record)
+                self.thread = self.live_thread
+                return copy.deepcopy(record)
             self._space(self.config.chunk_seconds * BYTES_PER_SECOND)
             record.update(status="transcribing", error=None)
             self._save(record)
@@ -392,10 +442,144 @@ class MeetingService:
     def cancel(self, meeting_id):
         with self.lock:
             record = self._get(meeting_id)
+            if self.active == meeting_id and record.get("live_transcription") and self.live_running:
+                self.live_cancel.set()
+                self.live_wakeup.set()
+                return copy.deepcopy(record)
             if self.active != meeting_id or record["status"] != "transcribing":
                 raise MeetingError("この会議は文字起こし中ではありません。", 409)
             self.cancel_event.set()
             return copy.deepcopy(record)
+
+    def _launch_live(self, record):
+        """Called with the metadata lock. Inference never runs on the capture worker."""
+        self.live_cancel = threading.Event()
+        self.live_running = True
+        record.update(transcription_status="waiting", transcription_error=None)
+        if self.capture_finished.is_set():
+            record["status"] = "transcribing"
+        self._save(record)
+        self.live_thread = threading.Thread(target=self._transcribe_live, args=(record,), daemon=True)
+        self.live_thread.start()
+
+    def _settle_live(self, record):
+        if not self.capture_finished.is_set():
+            return  # STT failure/pause must never change recording/stopping state.
+        if self.live_running:
+            record["status"] = "transcribing"
+        elif record["transcription_status"] == "failed" or not record["duration_seconds"]:
+            record["status"] = "failed"
+        elif record["transcription_status"] == "completed":
+            record["status"] = "interrupted" if record["error"] else "completed"
+        else:
+            record["status"] = "interrupted"
+
+    def _transcribe_live(self, record):
+        directory = self._directory(record["id"])
+        chunk_frames = record["live_chunk_seconds"] * RATE
+        offset = 0
+        segments = []
+        last_published = None
+        inference_seconds = 0
+        try:
+            self.engine.check()
+            # Audio is an append-only PCM stream owned by this meeting. Its size/mtime
+            # must not invalidate finished chunks while capture appends new samples.
+            identity = {"engine": self.engine.identity(), "meeting": record["id"],
+                        "language": record["language"], "chunk_seconds": record["live_chunk_seconds"],
+                        "format": "live-pcm-v1"}
+            fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
+            checkpoints = directory / "chunks" / fingerprint
+            checkpoints.mkdir(parents=True, exist_ok=True)
+
+            def publish():
+                nonlocal last_published
+                with self.lock:
+                    record.update(transcribed_seconds=offset / RATE, model=self.config.model.name,
+                                  progress={"done": math.ceil(offset / chunk_frames),
+                                            "total": math.ceil(record["duration_seconds"] * RATE / chunk_frames)})
+                self._publish(record, segments, identity)
+                last_published = offset
+
+            while True:
+                if self.live_cancel.is_set():
+                    raise TranscriptionCancelled()
+                self.live_wakeup.clear()
+                with self.lock:
+                    available = round(record["duration_seconds"] * RATE)
+                    finished = self.capture_finished.is_set()
+                frames = min(chunk_frames, available - offset)
+                if frames <= 0 or (frames < chunk_frames and not finished):
+                    if last_published != offset:
+                        publish()
+                    if finished:
+                        if not available:
+                            raise ValueError("文字起こしに使える録音音声がありません。")
+                        break
+                    with self.lock:
+                        record["transcription_status"] = "waiting"
+                    self.live_wakeup.wait(0.5)
+                    continue
+
+                checkpoint = checkpoints / f"{offset // chunk_frames:05}.json"
+                cached = json.loads(checkpoint.read_text(encoding="utf-8")) if checkpoint.exists() else None
+                reused = cached is not None and cached["frames"] == frames
+                if reused:
+                    chunk_segments = cached["segments"]
+                else:
+                    if last_published != offset:
+                        publish()
+                    self._space(frames * 2)
+                    raw = directory / "audio.pcm"
+                    if raw.exists():
+                        with raw.open("rb") as source:
+                            source.seek(offset * 2)
+                            audio = source.read(frames * 2)
+                    else:
+                        with wave.open(str(directory / "audio.wav"), "rb") as source:
+                            validate_wav(source)
+                            source.setpos(offset)
+                            audio = source.readframes(frames)
+                    if len(audio) != frames * 2:
+                        raise ValueError("保存済み音声を読み出せませんでした。録音ファイルを確認してください。")
+                    chunk = checkpoints / "input.wav"
+                    with wave.open(str(chunk), "wb") as output:
+                        output.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
+                        output.writeframes(audio)
+                    with self.lock:
+                        record["transcription_status"] = "processing"
+                    started = time.monotonic()
+                    try:
+                        result = self.engine.transcribe(chunk, record["language"], self.live_cancel)
+                        chunk_segments = [{**item, "start": item["start"] + offset / RATE,
+                                           "end": item["end"] + offset / RATE} for item in result.segments]
+                        atomic_json(checkpoint, {"frames": frames, "segments": chunk_segments})
+                    finally:
+                        inference_seconds += time.monotonic() - started
+                        chunk.unlink(missing_ok=True)
+                for item in chunk_segments:
+                    segments.append({**item, "id": len(segments)})
+                offset += frames
+                if not reused:
+                    publish()
+            with self.lock:
+                record.update(transcription_status="completed", transcription_error=None)
+        except TranscriptionCancelled:
+            with self.lock:
+                record.update(transcription_status="paused", transcription_error=None)
+        except Exception as exception:
+            with self.lock:
+                record.update(transcription_status="failed", transcription_error=str(exception))
+        finally:
+            with self.lock:
+                record["processing_seconds"] = round(record.get("processing_seconds", 0) + inference_seconds, 2)
+                self.live_running = False
+                self._settle_live(record)
+                try:
+                    self._save(record)
+                finally:
+                    if self.capture_finished.is_set():
+                        self.active = None
 
     def _transcribe(self, record):
         directory = self._directory(record["id"])
@@ -458,13 +642,16 @@ class MeetingService:
 
     def _publish(self, record, segments, identity):
         directory = self._directory(record["id"])
-        atomic_json(directory / "transcript.json", {"language": record["language"], "engine": "whisper.cpp", "identity": identity, "segments": segments})
-        lines = ["# 文字起こし", "", f"会議: {record['title']}", f"開始: {record['created_at']}",
+        with self.lock:
+            snapshot = copy.deepcopy(record)
+        atomic_json(directory / "transcript.json", {"language": snapshot["language"], "engine": "whisper.cpp", "identity": identity, "segments": segments})
+        lines = ["# 文字起こし", "", f"会議: {snapshot['title']}", f"開始: {snapshot['created_at']}",
                  f"言語: {record['language']} / モデル: {self.config.model.name}",
-                 f"処理済み区間: {record['progress']['done']} / {record['progress']['total']}", ""]
+                 f"処理済み区間: {snapshot['progress']['done']} / {snapshot['progress']['total']}", ""]
         lines += [f"[{timestamp(s['start'])} – {timestamp(s['end'])}] {s['text']}" for s in segments]
         atomic_text(directory / "transcript.md", "\n".join(lines) + "\n")
-        self._save(record)
+        with self.lock:
+            self._save(record)
 
     def download(self, meeting_id, name):
         with self.lock:
@@ -488,9 +675,13 @@ class MeetingService:
         with self.lock:
             self.closed = True
             self.cancel_event.set()
+            self.live_cancel.set()
+            self.live_wakeup.set()
             process = self.process
             if process and process.poll() is None:
                 process.terminate()
         if self.thread:
             self.thread.join()
+        if self.live_thread and self.live_thread is not self.thread:
+            self.live_thread.join()
         self.directory_lock.close()

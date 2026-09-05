@@ -23,7 +23,8 @@ def capabilities(config):
     return {"recording_available": bool(shutil.which("arecord")),
             "transcription_available": not errors, "errors": errors,
             "model": config.model.name, "audio_device": config.device,
-            "max_seconds": config.max_seconds, "chunk_seconds": config.chunk_seconds}
+            "max_seconds": config.max_seconds, "chunk_seconds": config.chunk_seconds,
+            "live_chunk_seconds": config.live_chunk_seconds}
 
 
 def make_handler(service, dist_dir=REPO / "frontend/dist"):
@@ -104,7 +105,7 @@ def make_handler(service, dist_dir=REPO / "frontend/dist"):
                     raise MeetingError("リクエストの形式が不正です。")
                 path = urlparse(self.path).path
                 if path == "/api/meetings":
-                    return self.send_json(service.start(data.get("title", ""), data.get("language", "ja")), 201)
+                    return self.send_json(service.start(data.get("title", ""), data.get("language", "ja"), data.get("live", False)), 201)
                 parts = path.strip("/").split("/")
                 if len(parts) != 4 or parts[:2] != ["api", "meetings"]:
                     raise MeetingError("操作が見つかりません。", 404)

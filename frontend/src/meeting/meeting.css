@@ -16,6 +16,10 @@ a { color: #9eead2; text-underline-offset: 3px; }
 .panel { border: 1px solid #334356; border-radius: 10px; padding: 14px; background: #192532; }
 .fields { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-bottom: 12px; }
 label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: #bfcedf; }
+.live-option { flex-direction: row; align-items: center; gap: 8px; margin: 8px 0; min-height: 36px; }
+.live-option input { width: 20px; min-height: 20px; accent-color: #80dec0; }
+.live-option + small { margin: 0 0 12px; }
+.live-progress { font-size: 13px; line-height: 1.6; color: #bfcedf; }
 input, select { min-width: 0; width: 100%; min-height: 42px; border: 1px solid #526174; border-radius: 6px; padding: 8px; background: #101b27; color: #eef4fb; }
 .primary { color: #102c24; background: #80dec0; border-color: #80dec0; font-weight: 650; }
 .stop { background: #71372e; border-color: #e6a494; color: #fff2ee; }
@@ -31,7 +35,7 @@ h2 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
 .live-dot, .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #92a4bd; margin-right: 7px; }
 .live-dot { background: #ff8a73; }
 .active-meeting { background: transparent; border-color: transparent; padding-left: 0; }
-.transcript { border-top: 1px solid #334356; margin-top: 14px; }
+.transcript { border-top: 1px solid #334356; margin-top: 14px; max-height: 50vh; overflow-y: auto; }
 .transcript p { display: flex; flex-direction: column; gap: 5px; margin: 14px 0; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
 time { font-size: 11px; color: #91bcae; font-variant-numeric: tabular-nums; }
 .empty { color: #a0afc2; font-size: 13px; padding: 12px 0; }

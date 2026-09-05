@@ -7,6 +7,8 @@
 This fork adds a separate meeting recorder while retaining the original translator.
 On a 64-bit Raspberry Pi, run `bash setup-meeting.sh --model base`, then
 `bash start-meeting.sh` and open `http://localhost:3001` on the Pi.
+Transcription can run during recording, publishing results in 10-second audio chunks
+plus inference time. You can also record first and transcribe after stopping.
 See [会議レコーダーの導入・操作・実機 E2E 手順](docs/meeting-recorder.md) for microphone setup,
 offline operation, recovery, and long-recording validation. Live translation and summary generation are planned follow-ups.
 

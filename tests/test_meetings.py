@@ -330,6 +330,232 @@ class ServiceTests(unittest.TestCase):
             worker.join()
 
 
+class GatedEngine(FakeEngine):
+    """Hold the first inference while the recorder keeps producing audio."""
+    def __init__(self):
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def transcribe(self, path, language, cancel):
+        result = super().transcribe(path, language, cancel)
+        if len(self.calls) == 1:
+            self.started.set()
+            while not self.release.wait(0.02):
+                if cancel.is_set():
+                    raise TranscriptionCancelled()
+        return result
+
+
+class LiveServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.config = MeetingConfig(data_dir=self.root / "meetings", live_chunk_seconds=2, reserve_bytes=0)
+        self.engine = FakeEngine()
+        self.service = MeetingService(self.config, engine=self.engine)
+
+    def tearDown(self):
+        self.service.close()
+        self.temporary.cleanup()
+
+    def recorder(self, seconds=5):
+        script = ("import sys,time\n"
+                  f"for i in range({seconds}):\n"
+                  " sys.stdout.buffer.write(bytes([i, 0])*16000); sys.stdout.buffer.flush(); time.sleep(0.05)\n"
+                  "time.sleep(30)")
+        self.service.recorder_command = [sys.executable, "-u", "-c", script]
+
+    def start(self, seconds=5):
+        self.recorder(seconds)
+        return self.service.start("ライブ会議", "ja", live=True)["id"]
+
+    def stopped(self, meeting_id):
+        self.service.stop(meeting_id)
+        self.service.thread.join(5)
+        self.assertFalse(self.service.thread.is_alive())
+
+    def finished(self):
+        self.service.live_thread.join(5)
+        self.assertFalse(self.service.live_thread.is_alive())
+
+    def test_recorder_launch_failure_does_not_leave_live_work_waiting(self):
+        self.service.recorder_command = [str(self.root / "missing-recorder")]
+        with self.assertRaises(MeetingError):
+            self.service.start("起動失敗", "ja", live=True)
+        record = self.service.list()[0]
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["capture_status"], "failed")
+        self.assertEqual(record["transcription_status"], "failed")
+        self.assertIsNone(self.service.active)
+        self.assertFalse(self.service.live_running)
+
+    def test_http_live_results_pause_resume_and_automatic_finalization(self):
+        self.recorder()
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.service))
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+
+        def request(method, path, body=None):
+            connection = http.client.HTTPConnection(*server.server_address, timeout=5)
+            encoded = json.dumps(body).encode() if body is not None else None
+            connection.request(method, path, encoded, {"Content-Type": "application/json"})
+            response = connection.getresponse()
+            payload = json.loads(response.read())
+            code = response.status
+            connection.close()
+            return code, payload
+
+        try:
+            code, record = request("POST", "/api/meetings", {"title": "HTTP live", "language": "ja", "live": True})
+            self.assertEqual(code, 201)
+            meeting_id = record["id"]
+            path = f"/api/meetings/{meeting_id}"
+            wait_for(lambda: request("GET", path)[1].get("transcribed_seconds") == 4)
+            code, record = request("GET", path)
+            self.assertEqual(code, 200)
+            self.assertEqual(record["status"], "recording")
+            self.assertTrue(record["transcript"]["segments"])
+            self.assertIn("transcription_lag_seconds", record)
+            self.assertEqual(request("POST", path + "/cancel", {})[0], 202)
+            self.finished()
+            self.assertEqual(request("GET", path)[1]["status"], "recording")
+            self.assertEqual(request("POST", path + "/transcribe", {})[0], 202)
+            wait_for(lambda: self.service.get(meeting_id)["duration_seconds"] == 5)
+            self.assertEqual(request("POST", path + "/stop", {})[0], 202)
+            self.service.thread.join(5)
+            self.finished()
+            record = request("GET", path)[1]
+            self.assertEqual(record["status"], "completed")
+            self.assertEqual(record["transcribed_seconds"], 5)
+            self.assertEqual(record["transcription_lag_seconds"], 0)
+            self.assertEqual([item["id"] for item in record["transcript"]["segments"]], [0, 1, 2])
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
+
+    def test_results_are_published_before_stop_and_final_partial_chunk_is_kept(self):
+        meeting_id = self.start()
+        wait_for(lambda: self.service.get(meeting_id).get("transcribed_seconds") == 4)
+        result = self.service.get(meeting_id)
+        self.assertEqual(result["status"], "recording")
+        self.assertEqual(len(result["transcript"]["segments"]), 2)
+        self.assertFalse(result["has_audio"])
+        wait_for(lambda: self.service.get(meeting_id)["duration_seconds"] == 5)
+        self.stopped(meeting_id)
+        self.finished()
+        result = self.service.get(meeting_id)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["progress"], {"done": 3, "total": 3})
+        self.assertEqual(result["transcription_lag_seconds"], 0)
+        self.assertEqual([(s["start"], s["end"]) for s in result["transcript"]["segments"]], [(0, 2), (2, 4), (4, 5)])
+        self.assertEqual(b"".join(self.engine.calls), b"".join(bytes([i, 0]) * 16000 for i in range(5)))
+
+    def test_slow_inference_keeps_capture_running_and_drains_backlog_after_stop(self):
+        self.engine = GatedEngine()
+        self.service.engine = self.engine
+        meeting_id = self.start()
+        self.assertTrue(self.engine.started.wait(5))
+        wait_for(lambda: self.service.get(meeting_id)["duration_seconds"] == 5)
+        self.assertEqual(self.service.get(meeting_id)["transcription_lag_seconds"], 5)
+        self.stopped(meeting_id)
+        self.assertEqual(self.service.get(meeting_id)["status"], "transcribing")
+        with self.assertRaises(MeetingError):
+            self.service.start("別会議", "ja")
+        with self.assertRaises(MeetingError):
+            self.service.delete(meeting_id)
+        self.engine.release.set()
+        self.finished()
+        self.assertEqual(self.service.get(meeting_id)["status"], "completed")
+
+    def test_inference_failure_does_not_stop_recording_and_can_resume_in_place(self):
+        self.engine.fail_at = 2
+        meeting_id = self.start()
+        wait_for(lambda: self.service.get(meeting_id)["transcription_status"] == "failed")
+        wait_for(lambda: self.service.get(meeting_id)["duration_seconds"] == 5)
+        result = self.service.get(meeting_id)
+        self.assertEqual(result["status"], "recording")
+        self.assertIn("Test inference failure", result["transcription_error"])
+        self.assertEqual(result["transcribed_seconds"], 2)
+        self.engine.fail_at = None
+        self.service.transcribe(meeting_id)
+        wait_for(lambda: self.service.get(meeting_id)["transcribed_seconds"] == 4)
+        self.stopped(meeting_id)
+        self.finished()
+        self.assertEqual(self.service.get(meeting_id)["status"], "completed")
+        self.assertEqual(len(self.engine.calls), 4)
+
+    def test_pause_does_not_stop_capture_and_resume_uses_saved_audio(self):
+        self.engine = GatedEngine()
+        self.service.engine = self.engine
+        meeting_id = self.start()
+        self.assertTrue(self.engine.started.wait(5))
+        self.service.cancel(meeting_id)
+        self.finished()
+        wait_for(lambda: self.service.get(meeting_id)["duration_seconds"] == 5)
+        self.assertEqual(self.service.get(meeting_id)["status"], "recording")
+        self.assertEqual(self.service.get(meeting_id)["transcription_status"], "paused")
+        self.service.transcribe(meeting_id)
+        wait_for(lambda: self.service.get(meeting_id)["transcribed_seconds"] == 4)
+        self.stopped(meeting_id)
+        self.finished()
+        result = self.service.get(meeting_id)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual([s["id"] for s in result["transcript"]["segments"]], [0, 1, 2])
+
+    def test_short_recording_waits_until_stop_and_keeps_whole_audio(self):
+        meeting_id = self.start(seconds=1)
+        wait_for(lambda: self.service.get(meeting_id)["duration_seconds"] == 1)
+        self.assertEqual(self.engine.calls, [])
+        self.stopped(meeting_id)
+        self.finished()
+        result = self.service.get(meeting_id)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["transcribed_seconds"], 1)
+        self.assertEqual(len(self.engine.calls[0]), 32000)
+
+    def test_missing_model_does_not_prevent_recording(self):
+        with patch.object(self.engine, "check", side_effect=ValueError("モデル未配置")):
+            meeting_id = self.start(seconds=1)
+            self.finished()
+        wait_for(lambda: self.service.get(meeting_id)["duration_seconds"] == 1)
+        self.assertEqual(self.service.get(meeting_id)["status"], "recording")
+        self.stopped(meeting_id)
+        self.assertTrue(self.service.get(meeting_id)["has_audio"])
+        self.service.transcribe(meeting_id)
+        self.finished()
+        self.assertEqual(self.service.get(meeting_id)["status"], "completed")
+
+    def test_restart_reuses_live_checkpoints(self):
+        meeting_id = self.start()
+        wait_for(lambda: self.service.get(meeting_id)["transcribed_seconds"] == 4)
+        self.service.cancel(meeting_id)
+        self.finished()
+        wait_for(lambda: self.service.get(meeting_id)["duration_seconds"] == 5)
+        self.stopped(meeting_id)
+        record = self.service.records[meeting_id]
+        record.update(status="transcribing", transcription_status="processing")
+        self.service._save(record)
+        self.service.close()
+        self.service = MeetingService(self.config, engine=self.engine)
+        self.service.transcribe(meeting_id)
+        self.finished()
+        self.assertEqual(self.service.get(meeting_id)["status"], "completed")
+        self.assertEqual(len(self.engine.calls), 3)
+
+    def test_shutdown_stops_both_workers_and_preserves_recorded_audio(self):
+        self.engine = GatedEngine()
+        self.service.engine = self.engine
+        meeting_id = self.start()
+        self.assertTrue(self.engine.started.wait(5))
+        self.service.close()
+        self.assertFalse(self.service.thread.is_alive())
+        self.assertFalse(self.service.live_thread.is_alive())
+        self.assertTrue(self.service.get(meeting_id)["has_audio"])
+        self.assertEqual(self.service.get(meeting_id)["transcription_status"], "paused")
+
+
 class AdapterTests(unittest.TestCase):
     def test_moonshine_keeps_pcm_contract_and_text_joining(self):
         samples = [0.1, 0.2]

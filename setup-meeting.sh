@@ -77,6 +77,7 @@ if [[ ! -e "$CONFIG_FILE" ]]; then
         printf 'export MEETING_DATA_DIR=%q\n' "$LOCAL_DIR/meetings"
         printf 'export MEETING_AUDIO_DEVICE=%q\n' default
         printf 'export WHISPER_THREADS=3\nexport MEETING_CHUNK_SECONDS=300\n'
+        printf 'export MEETING_LIVE_CHUNK_SECONDS=10\n'
         printf 'export MEETING_MAX_SECONDS=7200\nexport WHISPER_TIMEOUT_SECONDS=1800\n'
         printf 'export MEETING_HOST=127.0.0.1\nexport MEETING_PORT=3001\n'
     } > "$CONFIG_FILE"
