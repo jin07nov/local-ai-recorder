@@ -50,7 +50,7 @@ export async function testConnectionAPI(endpointUrl, useProxy, apiKey) {
   return true
 }
 
-// POST base64 Float32 PCM (16 kHz mono) to the local Moonshine STT.
+// POST Float32 PCM to local STT (Moonshine, or whisper.cpp for German).
 export async function transcribeAudio(base64Data, sourceLangCode) {
   const response = await fetch("/api/stt", {
     method: "POST",
@@ -62,7 +62,8 @@ export async function transcribeAudio(base64Data, sourceLangCode) {
   })
 
   if (!response.ok) {
-    throw new Error(`STT failed: ${response.status}`)
+    const detail = (await response.text()).trim()
+    throw new Error(`STT failed: ${response.status}${detail ? ` — ${detail}` : ""}`)
   }
 
   const sttData = await response.json()

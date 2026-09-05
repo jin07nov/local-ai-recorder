@@ -12,6 +12,11 @@ plus inference time. You can also record first and transcribe after stopping.
 See [会議レコーダーの導入・操作・実機 E2E 手順](docs/meeting-recorder.md) for microphone setup,
 offline operation, recovery, and long-recording validation. Live translation and summary generation are planned follow-ups.
 
+The original translator at `http://localhost:3000` also offers **German** in both lanes.
+German speech uses the local whisper.cpp installation; the existing six languages keep Moonshine STT.
+Translation uses Gemma, and German speech output uses moonshine-voice (`de-de`).
+See [元の翻訳画面・ドイツ語の使い方と Pi 更新手順](docs/translator.md).
+
 This repo was built with the assistance of [Google Antigravity](https://antigravity.google/) and includes code to run an on-device, fully offline voice translator powered by [Gemma 4](https://ai.google.dev/gemma/docs/core) and [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-lm). This project features a web frontend optimized for small handheld displays (e.g., 480x320) and a Python API server (`http.server`) that communicates with Gemma. Text-to-speech is powered by [Moonshine](https://github.com/moonshine-ai/moonshine).
 
 https://github.com/user-attachments/assets/343072ce-dc78-44a7-a783-99312845cabe

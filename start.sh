@@ -42,6 +42,12 @@ LITERT_PORT=9379
 API_PORT=3000
 WEB_PORT=5173
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Reuse the local Whisper installation for German in Translator Mode.
+# Existing Moonshine STT, browser microphone selection and LLM settings are unchanged.
+WHISPER_CONFIG_FILE="${MEETING_ENV_FILE:-$PROJECT_DIR/.local/meeting.env}"
+if [ -f "$WHISPER_CONFIG_FILE" ]; then
+    source "$WHISPER_CONFIG_FILE"
+fi
 LITERT_CMD="${PROJECT_DIR}/venv/bin/litert-lm serve"
 API_CMD="${PROJECT_DIR}/venv/bin/python3 ${PROJECT_DIR}/backend/server.py"
 WEB_CMD="npm --prefix ${PROJECT_DIR}/frontend run dev"

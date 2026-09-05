@@ -124,6 +124,10 @@ class WhisperCppSTT:
             if not result_file.is_file():
                 raise RuntimeError("whisper.cpp の JSON 出力がありません。バージョン・モデルを確認してください。")
             data = json.loads(result_file.read_text(encoding="utf-8"))
+        # The CLI silently forces English when an English-only model is selected.
+        # Inspect the actual model metadata, even if the model file was renamed.
+        if language != "en" and data.get("model", {}).get("multilingual") is False:
+            raise ValueError("この言語には多言語版の Whisper モデルが必要です。base / small の .en なしを選択してください。")
         segments = []
         for item in data["transcription"]:
             start = float(item["offsets"]["from"]) / 1000

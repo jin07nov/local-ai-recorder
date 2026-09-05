@@ -9,6 +9,22 @@
 症状または確認した事実、原因、対処または今後の対応、教訓、根拠を記載する。
 未解決の項目に「解決済み」と書かず、試した環境・モデル・版を残す。
 
+## 2026-09-05 元の翻訳画面でドイツ語を使うための経路
+
+**確認方法**: ユーザーの追加依頼、コード調査、固定版 `moonshine-voice==0.0.65` の公式 Windows wheel（PyPI の SHA256 と照合）、HTTP の自動テスト。
+
+**事実**: 固定版の STT カタログは `ar/es/en/ja/ko/vi/uk/zh` でドイツ語はない。一方、ネイティブ TTS カタログには `de-de` と複数の German Piper 音声がある。
+Windows 版のカタログ取得では返却文字列の解放時に `0xc0000374` が発生した。検証用の短命プロセス内で解放だけを省略してカタログを確認した。これは Pi の動作試験や音声合成の成功を意味せず、回避策をアプリには入れていない。
+
+**対処**: 元の3000番の画面に German を追加し、ドイツ語の STT だけ whisper.cpp へ接続する。既存 Float32 PCM を一時 WAV に変換し、成功・失敗時に後始末する。Gemma 翻訳は既存のレーン言語を使い、TTS は `de` → `de-de` とする。
+元の `start.sh` も `.local/meeting.env` を読むため、会議で選択した Whisper モデルが使われる。会議用サーバーの起動は不要。
+Whisper CLI も英語専用モデルを与えると `-l de` を `en` に変えるため、JSON の `model.multilingual` を検査して非英語の結果を拒否する。
+
+**確認結果**: 自動テスト41件・両 UI のビルド・起動スクリプトの Bash 構文、フロントエンドの de 送信・エラー本文保持が成功。
+**未確認**: Pi でのドイツ語音声認識・Gemma 翻訳・読み上げの品質、初回ダウンロード、オフライン、実際のキー操作。認識器と TTS をテスト用に置き換えた API 検証とは区別する。
+
+**根拠**: [server.py](../backend/server.py)、[test_translator.py](../tests/test_translator.py)、[Pi の手順](../docs/translator.md)、[固定配布版](https://pypi.org/project/moonshine-voice/0.0.65/)、[Whisper CLI](https://github.com/ggml-org/whisper.cpp/blob/b4938/examples/cli/cli.cpp)。
+
 ## 2026-09-05 録音中の文字起こしと実機評価の境界
 
 **確認方法**: Windows / Python 3.14 の自動テスト33件、両 UI のビルド、導入スクリプトの Bash 構文確認。

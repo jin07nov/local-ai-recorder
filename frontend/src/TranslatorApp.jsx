@@ -27,7 +27,7 @@ import {
 import { playBlip } from "./utils/audio-blip"
 
 // Core orchestrator for the two-person kiosk translator.
-// Flow: hold a key → record mic (useAudioRecorder) → POST /api/stt (Moonshine)
+// Flow: hold a key → record mic → POST /api/stt (Moonshine; German: whisper.cpp)
 // → LLM translation via /proxy (Gemma, strict-JSON prompt) → /api/tts playback.
 
 // Languages offered on each lane's revolver; ttsLang selects the backend voice.
@@ -38,6 +38,7 @@ const AVAILABLE_LANGUAGES = [
   { code: "ja", name: "Japanese", voice: "tts", ttsLang: "ja" },
   { code: "zh", name: "Chinese", voice: "tts", ttsLang: "zh" },
   { code: "ko", name: "Korean", voice: "tts", ttsLang: "ko" },
+  { code: "de", name: "German", voice: "tts", ttsLang: "de" },
 ]
 
 function TranslatorApp({ config }) {

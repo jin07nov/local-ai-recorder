@@ -9,17 +9,17 @@
 |---|---|---|
 | UI | React 18 / Vite 5。小型画面向けの2人用翻訳 UI | [package.json](../frontend/package.json)、[TranslatorApp.jsx](../frontend/src/TranslatorApp.jsx) |
 | 録音 | Web Audio で Float32 PCM をメモリに蓄積。停止時に結合・16 kHz モノラル化・Base64 化 | [useAudioRecorder.js](../frontend/src/hooks/useAudioRecorder.js) |
-| STT | `POST /api/stt` が `audio_base64` / `language` を受け取り、Moonshine の結果を `{"text": ...}` で返す | [api.js](../frontend/src/utils/api.js)、[server.py](../backend/server.py) |
+| STT | `POST /api/stt` が `audio_base64` / `language` を受け取り、既存言語は Moonshine、ドイツ語は whisper.cpp の結果を `{"text": ...}` で返す | [api.js](../frontend/src/utils/api.js)、[server.py](../backend/server.py) |
 | API | `http.server` / `ThreadingTCPServer`。ポート 3000。推論は STT / TTS それぞれのロックで保護 | [server.py](../backend/server.py) |
 | 翻訳 | ローカル LiteRT-LM のポート 9379 を利用。モデル名の既定は `gemma4-e2b` | [api.js](../frontend/src/utils/api.js)、[download_model.sh](../download_model.sh) |
 | TTS | `moonshine-voice` の `TextToSpeech`。STT と同じ Python パッケージを利用 | [server.py](../backend/server.py)、[requirements.txt](../backend/requirements.txt) |
-| 言語 | UI・STT・TTS は `ar` / `en` / `es` / `ja` / `zh` / `ko`。`de` は未登録。未対応言語は既存 STT / TTS で英語にフォールバックする | [TranslatorApp.jsx](../frontend/src/TranslatorApp.jsx)、[server.py](../backend/server.py) |
+| 言語 | 翻訳 UI は既存6言語と `de`。ドイツ語は whisper.cpp STT、Gemma 翻訳、moonshine-voice `de-de` TTS。会議 UI へのドイツ語追加は後続 | [TranslatorApp.jsx](../frontend/src/TranslatorApp.jsx)、[server.py](../backend/server.py) |
 | 起動・配備 | 開発 UI は 5173。本番は Python が `frontend/dist/` を配信。systemd / Chromium kiosk の配備スクリプトあり | [start.sh](../start.sh)、[deploy-pi.sh](../deploy-pi.sh) |
 | 会議録音 | Pi の `arecord` → 逐次 PCM 保存 → 停止後 WAV 確定。会議一覧・中断復旧・削除 | [meetings.py](../backend/meetings.py) |
 | 会議 STT | whisper.cpp CLI を別プロセスで呼び、録音中の短区間処理または停止後の処理で原文・時刻を保存。一時停止・再開に対応 | [stt.py](../backend/stt.py)、[meetings.py](../backend/meetings.py) |
 | 会議 UI / API | ポート3001の独立サーバー。標準 Python のみで起動。会議 UI は Vite の別エントリとしてビルド | [meeting_server.py](../backend/meeting_server.py)、[MeetingApp.jsx](../frontend/src/meeting/MeetingApp.jsx) |
 | 会議導入 | whisper.cpp `b4938` のソースビルド、多言語 `base` / `small`、UI の構築。既存サービス設定は維持 | [setup-meeting.sh](../setup-meeting.sh)、[start-meeting.sh](../start-meeting.sh) |
-| 後続機能 | ドイツ語の選択・ライブ翻訳・要約・TODO 生成は未実装 | P2 / P3 の計画 |
+| 後続機能 | 会議のドイツ語選択・ライブ翻訳・要約・TODO 生成は未実装 | P2 / P3 の計画 |
 
 既存起動手順は [README.md](../README.md) を参照する。記載された導入手順は主に Linux / macOS 向けで、
 今回の Windows 作業環境で Pi の動作を検証したわけではない。
@@ -43,7 +43,8 @@ whisper.cpp はファイル入力・タイムスタンプ・VAD を提供して�
 
 ```text
 Translator Mode
-  短い発話 → MoonshineSTT → Gemma（翻訳）→ TTS
+  短い発話 → MoonshineSTT（既存6言語）/ WhisperCppSTT（ドイツ語）
+    → Gemma（翻訳）→ TTS（ドイツ語は de-de）
 
 Meeting Mode / P1（直近のゴール）
   録音開始 → 音声の逐次保存 → 録音停止
@@ -69,7 +70,7 @@ P3（後続）
 - `SpeechToText.transcribe(audio_path, language)` の入力は 16 kHz / mono / 16-bit PCM WAV。形式・空音声・データ途切れを検査する。
 - `Transcription` は `text` / `language` / `engine` / `segments`。各区間は `start` / `end`（秒）/ `text`。モデル情報は会議メタデータ・処理識別情報へ保存する。
 - `MoonshineSTT.transcribe_samples` は既存の Float32 PCM をそのまま既存キャッシュ・ロックへ渡す。既存 `POST /api/stt` の入力と `{"text": ...}` 応答は維持し、時刻は生成しない。
-- Translator Mode は Moonshine、会議は whisper.cpp と固定する。全体を切り替える `STT_ENGINE` は導入しない。
+- Translator Mode は既存6言語を Moonshine、追加のドイツ語だけ whisper.cpp とする。会議は whisper.cpp。全体を切り替える `STT_ENGINE` は導入しない。
 - `WhisperCppSTT` は `whisper-cli -m ... -f ... -l ... -t ... -oj -of ... -np -ng` をシェルを介さず起動する。翻訳オプション `-tr` は指定せず原言語を認識する。
 - `b4938` の JSON `transcription[].offsets.from/to` はミリ秒として読み、秒へ変換する。終了コード・モデル欠落・結果欠落・時刻不正・タイムアウト・キャンセルを扱う。
 - 区間推論のタイムアウトとキャンセル時は子プロセスを終了する。モデル出力は通常ログへ出さず、保存 JSON を読み込む。
@@ -121,14 +122,26 @@ Pi の `http://localhost:3001` から使用する。別PCはSSHポート転送�
 既存翻訳は3000、Gemmaは9379のまま。元の `start.sh` / `deploy-pi.sh` とサービス設定は変更しない。
 UI 開発時は Vite の `/meeting.html` を使い、`/api/meetings` だけ3001へプロキシする。
 
-### ドイツ語入力・ライブ翻訳・表示（P2 / 未実装）
+### 元の Translator Mode のドイツ語（追加実装）
+
+- 両レーンの言語一覧に German / `de` を追加。既存の Space / Z / X / 言語切り替え・TTS 設定と、録音停止後の翻訳フローを維持する。
+- `POST /api/stt` のドイツ語入力は16 kHzの生 Float32 PCMを一時的なmono PCM16 WAVに変換し、`WhisperCppSTT` に `de` を指定する。NaN等の不正な音声は拒否する。
+- 同じ STT ロックで直列化し、既存6言語は従来の Moonshine キャッシュへ渡す。`get_stt_recognizer("de")` は拒否し、英語へフォールバックしない。
+- Whisper の実モデル情報が英語専用を示す場合は非英語入力の結果を拒否する。モデルを別名にしても英語への暗黙切り替えを成功と扱わない。
+- 元の `start.sh` が `.local/meeting.env`（または `MEETING_ENV_FILE`）を読み、ドイツ語認識に既存の Whisper 設定を使う。会議サーバー3001を起動しておく必要はない。
+- 一時音声は Git / 静的配信の対象外の `.local/translator-tmp/stt-*/audio.wav` に置く。通常の成功・失敗時に削除する。強制終了時の残存はあり得る。翻訳画面の録音を会議として保存する機能は追加しない。
+- 訳文の言語は既存の相手レーンから Gemma のプロンプトへ渡す。ドイツ語の TTS は `de` → `de-de` とし、固定依存 moonshine-voice 0.0.65 の TextToSpeech を利用する。言語データ・音声は初回に取得し、以後キャッシュを利用する。
+- モデル未配置などの STT エラーは本文を画面に表示する。Pi の音声認識・Gemma 翻訳品質・読み上げ・画面実操作は検証待ち。
+- 手順は [元の翻訳画面・ドイツ語](../docs/translator.md)。会議のライブ翻訳やSTT優先の資源制御を実装済みとはしない。
+
+### 会議のドイツ語入力・ライブ翻訳・表示（P2 / 未実装）
 
 - 入力言語の選択肢にドイツ語（`de` / Deutsch / German）を追加し、最初の受け入れ例をドイツ語 → 日本語（`ja`）とする。
 - ドイツ語入力は新しい whisper.cpp の経路で原言語の文字起こしを行い、確定テキストを Gemma で日本語に翻訳する設計とする。品質は実機で評価する。
 - 言語一覧だけを追加せず、選択値を録音セッション・STT・翻訳先・表示まで引き渡す。`de` を既存 Moonshine の未対応言語フォールバックに流さない。
 - 既存 UI と言語一覧を共有する場合も、モード・STT・翻訳・TTS の対応能力を区別する。
-  Moonshine や TTS のドイツ語対応は未確認であり、一覧へ追加しただけで利用可能とみなさない。
-- 新しいライブ翻訳の必須出力は画面のテキスト。既存 Translator Mode の TTS は維持し、新機能のドイツ語 TTS は別途対応確認が必要な拡張とする。
+  固定版 Moonshine STT のカタログにドイツ語はない。TTS は `de-de` があり、Translator Mode へ接続した。実機品質は検証待ち。
+- 新しい会議のライブ翻訳の必須出力は画面のテキスト。Translator Mode の TTS は維持し、会議での訳文の読み上げは対象外とする。
 - 先行実装した録音中の文字起こしを利用し、原文区間が確定してから翻訳する。単語ごとの未確定字幕を必須にしない。
 - 原文区間の ID・開始/終了時刻・原言語を保存し、訳文は同じ区間 ID と翻訳先言語で対応付ける。
   原文を先に表示し、訳文が到着した区間へ追記する。到着順が変わっても会議順を維持し、原文を訳文で上書きしない。

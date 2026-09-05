@@ -26,10 +26,13 @@ import wave
 import traceback
 import socket
 import ssl
+import tempfile
+from pathlib import Path
 
 import threading
 from collections import OrderedDict
 from stt import MoonshineSTT
+from meetings import MeetingConfig
 
 # Multilingual STT via Moonshine.
 # Language is fixed at recognizer construction, so we lazily build (and cache) one
@@ -41,6 +44,7 @@ _stt_recognizers = OrderedDict()  # language -> recognizer
 # RLock (reentrant): handle_stt holds the lock across get_stt_recognizer() + inference,
 # and get_stt_recognizer() re-acquires it on the same thread. A plain Lock() self-deadlocks.
 _stt_lock = threading.RLock()
+TRANSLATOR_AUDIO_DIR = Path(BASE_DIR).parent / ".local" / "translator-tmp"
 
 # Multilingual TTS via moonshine-voice (Kokoro / Piper backed). Language is fixed at
 # TextToSpeech construction, so we lazily build (and cache) one engine per language used.
@@ -52,6 +56,7 @@ TTS_LANG_MAP = {
     "ja": "ja-jp",
     "zh": "zh-hans",
     "ko": "ko-kr",
+    "de": "de-de",
 }
 # Optional per-language voice override (moonshine-voice voice IDs). Languages not
 # listed here use moonshine's default voice for that language.
@@ -85,6 +90,8 @@ def get_tts_engine(language="en"):
         return _tts_engines[language]
 
 def get_stt_recognizer(language="en"):
+    if language == "de":
+        raise ValueError("ドイツ語の音声認識には whisper.cpp を使用してください。")
     if language not in SUPPORTED_STT_LANGS:
         language = "en"
     with _stt_lock:
@@ -100,6 +107,27 @@ def get_stt_recognizer(language="en"):
         model_path, model_arch = get_model_for_language(language)
         _stt_recognizers[language] = Transcriber(model_path=model_path, model_arch=model_arch)
         return _stt_recognizers[language]
+
+
+def transcribe_audio_samples(samples, language):
+    if language != "de":
+        return MoonshineSTT(get_stt_recognizer, _stt_lock).transcribe_samples(samples, language)
+
+    # Keep the browser's Float32 PCM API; only German uses the WAV-based adapter.
+    # Serialize translator STT as before, and never fall back to an English model.
+    with _stt_lock:
+        if not samples.size or not np.isfinite(samples).all():
+            raise ValueError("録音音声が空か不正です。もう一度録音してください。")
+        engine = MeetingConfig.from_env().engine()
+        engine.check()
+        TRANSLATOR_AUDIO_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.TemporaryDirectory(prefix="stt-", dir=TRANSLATOR_AUDIO_DIR) as directory:
+            audio_path = Path(directory) / "audio.wav"
+            pcm16 = (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2")
+            with wave.open(str(audio_path), "wb") as output:
+                output.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                output.writeframes(pcm16.tobytes())
+            return engine.transcribe(audio_path, "de")
 
 
 PORT = 3000
@@ -244,7 +272,7 @@ class ProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             # The browser sends a raw Float32Array buffer
             audio_np = np.frombuffer(raw_data, dtype=np.float32)
 
-            transcript = MoonshineSTT(get_stt_recognizer, _stt_lock).transcribe_samples(audio_np, language)
+            transcript = transcribe_audio_samples(audio_np, language)
             text = transcript.text
             print(f"[STT] Transcribed: {text}")
 

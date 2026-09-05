@@ -608,6 +608,25 @@ class AdapterTests(unittest.TestCase):
                     adapter.transcribe(wav, "ja")
             self.assertTrue(child.stopped)
 
+    def test_whisper_rejects_english_only_model_for_german_even_when_renamed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wav = make_wav(root / "audio.wav", seconds=1)
+            model = root / "renamed-model.bin"
+            model.write_bytes(b"test fixture")
+            adapter = WhisperCppSTT(Path(sys.executable), model)
+
+            def process(command, **kwargs):
+                destination = Path(command[command.index("-of") + 1] + ".json")
+                atomic_json(destination, {"model": {"multilingual": False},
+                                          "params": {"language": "en"}, "transcription": []})
+                return SimpleNamespace(wait=lambda timeout: 0, poll=lambda: 0)
+
+            with patch("stt.subprocess.Popen", side_effect=process):
+                with self.assertRaisesRegex(ValueError, "多言語版"):
+                    adapter.transcribe(wav, "de")
+                self.assertEqual(adapter.transcribe(wav, "en").text, "")
+
     @unittest.skipUnless(importlib.util.find_spec("numpy"), "Original translator requires numpy")
     def test_original_stt_http_response_remains_compatible(self):
         import server as translator_server
