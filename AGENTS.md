@@ -6,7 +6,7 @@ Gemma Translator を土台に、Raspberry Pi 向けの「スノークAIラボの
 オリジナルの機能・操作をそのまま維持し、会議の録音・文字起こし・翻訳・議事録機能を追加する。
 
 - **Translator Mode**: Moonshine STT → Gemma / LiteRT-LM → TTS。
-- **直近の開発ゴール（未実装）**: whisper.cpp の導入と長時間音声の文字起こし。翻訳・要約の完成を条件にしない。
+- **直近の開発ゴール（P1 実装済み・Pi 実機検証待ち）**: whisper.cpp の導入と長時間音声の文字起こし。翻訳・要約の完成を条件にしない。
 - **その次のゴール（未実装）**: ドイツ語の選択肢を追加し、ドイツ語 → 日本語などのライブ翻訳をフロントエンドに表示する。録音・文字起こしを優先する。
 - **後続の議事録機能（未実装）**: 文字起こし → Gemma → 要約・決定事項・TODO。
 - 主な対象は Raspberry Pi 5 / 8GB RAM、3.5 インチ LCD、USB マイク・スピーカー。
@@ -29,7 +29,7 @@ Gemma Translator を土台に、Raspberry Pi 向けの「スノークAIラボの
 4. 説明と管理文書は日本語を基本とし、コード上の識別子・コマンド・エラー原文は維持する。
 5. 完了報告には変更したもの、確認したこと、未確認のことを簡潔に記載する。
 
-**現在は管理文書・作業用スキルの整備と、そのコミットが対象。アプリのコード、依存関係、起動・配備設定には触れない。**
+**現在は P1 の長時間文字起こし実装が対象。会議用バックエンド・UI・Pi 用導入スクリプト・必要な検証を進める。**
 将来の Backlog があることを実装着手の指示と解釈しない。
 ユーザーから実装の依頼があったら、その範囲に合わせて PLAN / TODO を更新して進める。
 
@@ -63,11 +63,14 @@ Codex のスキル読み込み先は `.agents/skills/`。明示的なスキル�
 
 - `frontend/`: React / Vite の UI とブラウザ録音。
 - `backend/server.py`: Python 標準ライブラリの HTTP サーバー。STT・TTS・ローカル LLM プロキシ。
+- `backend/meeting_server.py` / `meetings.py` / `stt.py`: 独立した会議 API・録音と復旧・STT アダプター。
+- `frontend/src/meeting/` / `frontend/meeting.html`: 会議用 UI。既存翻訳 UI と同時にビルドする。
+- `setup-meeting.sh` / `start-meeting.sh`: 会議専用の導入と起動。手順と E2E は [docs/meeting-recorder.md](docs/meeting-recorder.md)。
 - `start.sh` / `setup.sh` / `download_model.sh` / `deploy-pi.sh` / `deploy/`: 起動・導入・Pi 配備。
-- [README.md](README.md): 現在は Gemma Translator の説明。Meeting Mode の実装状況を示す文書ではない。
+- [README.md](README.md): 会議用の導入案内と、上流の Gemma Translator の説明。
 - バージョンは依存定義・ロックファイルを確認する。存在しないテストや起動コマンドを記載しない。
 - 文書だけの変更ではリンク・記述の整合性・差分範囲を確認する。アプリのビルドや実機確認を済ませたことにしない。
-- 将来 UI を変更する場合の既存ビルドは `npm --prefix frontend run build`。録音・推論・配備の確認は対象の Linux / Pi 環境で別途行う。
+- 自動テストは `python -m unittest discover -s tests -v`、UI ビルドは `npm --prefix frontend run build`。録音・推論・配備の確認は対象の Linux / Pi 環境で別途行う。
 
 ## ブランチ運用
 
