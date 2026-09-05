@@ -59,6 +59,30 @@ USB マイクを明示するには `.local/meeting.env` 内の行を `export MEE
 ssh -L 3001:127.0.0.1:3001 user@raspberrypi
 ```
 
+### 録音が0秒で失敗する場合
+
+`--check` の `recording_available: true` は `arecord` コマンドがあるという確認です。マイクを開いて録音できることまでは検査していません。
+`arecord -L` のデバイス一覧と、`arecord -l` の録音ハードウェアを確認し、会議画面で録音を停止した状態で短い録音を試します。
+次は一覧に `plughw:CARD=Device,DEV=0` がある場合の例です。別の名前なら実際のカード名へ置き換えます。
+
+```bash
+arecord -l
+arecord -D plughw:CARD=Device,DEV=0 -f S16_LE -r 16000 -c 1 -d 5 /tmp/meeting-mic-test.wav
+aplay /tmp/meeting-mic-test.wav
+```
+
+`plughw` の変換を通すことで、アプリが必要とするチャンネル数・レート・形式で録音を試せます。
+仕様: [ALSA の自動変換プラグイン](https://www.alsa-project.org/alsa-doc/alsa-lib/pcm_plugins.html#pcm_plugins_plug)。
+声が入っていれば `.local/meeting.env` の既存行を次に変更し、会議サーバーを Ctrl+C → `bash start-meeting.sh` で再起動します。
+
+```bash
+export MEETING_AUDIO_DEVICE='plughw:CARD=Device,DEV=0'
+```
+
+端末で一時的に `export` するだけでは、起動スクリプトが設定ファイルの `default` で上書きするため、設定ファイル内を変更します。
+`Device or resource busy` が出る場合は、翻訳画面など別のアプリで録音を停止して再確認してください。
+それ以外の場合も `arecord` のエラー原文で切り分けます。会議画面には録音失敗時のデバイス名・終了コードと最大4 KiBのエラー末尾を表示します。
+
 ## 使い方と保存
 
 1. 会議名・話す言語を選び「録音を開始」を押す。

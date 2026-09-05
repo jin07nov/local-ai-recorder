@@ -8,6 +8,7 @@
 - ブランチ: `main`（`feat/meeting-transcription` の P1 実装をマージ）
 - 調査時の HEAD: `b194f30`（`Fix setup for Raspberry Pi 5 Trixie`）
 - フェーズ: P1 — 実装とローカル検証済み、Pi 実機 E2E 待ち。P0 は `0006fe0` で完了。
+- 現在の対応: Pi で録音が0秒で失敗するユーザー報告を調査。詳細エラーの保持・表示を修正し、USB デバイスを明示した短時間録音で切り分ける。
 
 ## プロジェクトのゴール
 

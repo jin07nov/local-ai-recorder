@@ -29,7 +29,7 @@ export default function MeetingApp() {
   const [language, setLanguage] = useState("ja")
   const [error, setError] = useState("")
   const [connectionError, setConnectionError] = useState("")
-  const [pending, setPending] = useState(false)
+  const [pending, setPending] = useState("")
   const [deleteConfirm, setDeleteConfirm] = useState(false)
   const selection = useRef(selected)
   selection.current = selected
@@ -63,7 +63,7 @@ export default function MeetingApp() {
   }, [selected])
 
   async function action(path, body = {}) {
-    setPending(true)
+    setPending(path || "start")
     setError("")
     try {
       const record = await api(path, body)
@@ -80,12 +80,13 @@ export default function MeetingApp() {
     } catch (exception) {
       setError(exception.message)
     } finally {
-      setPending(false)
+      setPending("")
     }
   }
 
   const active = meetings.find(m => busyStates.has(m.status))
   const disabled = pending || !!connectionError
+  const visibleError = error || (detail?.id === selected ? detail.error : "")
   const translatorUrl = new URL(window.location.href)
   translatorUrl.protocol = "http:"
   translatorUrl.port = "3000"
@@ -99,7 +100,7 @@ export default function MeetingApp() {
     </header>
     <p className="intro">Pi のマイクで録音し、停止後に文字起こしします。</p>
     {connectionError && <p className="alert" role="status">{connectionError}</p>}
-    {error && <p className="alert" role="alert">{error}</p>}
+    {visibleError && <p className="alert" role="alert">{visibleError}</p>}
     {status?.warnings?.map(w => <p key={w} className="alert">{w}</p>)}
     {status && !status.recording_available && <p className="alert">録音環境が未準備です。Pi で会議用のセットアップを行ってください。</p>}
     {status && !status.transcription_available && <p className="alert">文字起こし環境が未準備です。録音済みの音声は保持されます。{status.errors.join(" ")}</p>}
@@ -113,7 +114,8 @@ export default function MeetingApp() {
         <button className="active-meeting" onClick={() => { setSelected(active.id); setDetail(null); setDeleteConfirm(false) }}><span className={active.status === "recording" ? "live-dot" : "dot"} />{labels[active.status]} · {duration(active.duration_seconds)}</button>
         {active.status === "recording" && <button className="stop" disabled={disabled} onClick={() => action(`/${active.id}/stop`)}>録音を停止</button>}
         {active.status === "stopping" && <span>音声を保存しています…</span>}
-      </div> : <button className="primary" disabled={disabled || !status?.recording_available} onClick={() => action("", { title, language })}>● 録音を開始</button>}
+      </div> : <button className="primary" disabled={disabled || !status?.recording_available} onClick={() => action("", { title, language })}>{pending === "start" ? "録音を開始しています…" : "● 録音を開始"}</button>}
+      {status && <small>録音デバイス：{status.audio_device}</small>}
       <small>録音は Pi 側で続きます。終了時は「録音を停止」を押してください。</small>
     </section>
 
@@ -127,7 +129,6 @@ export default function MeetingApp() {
         {detail && detail.id === selected && <article className="panel transcript-panel">
           <div className="section-heading"><h2>{detail.title}</h2><span className="badge">{labels[detail.status]}</span></div>
           <p className="meta">{new Date(detail.created_at).toLocaleString("ja-JP")} · {duration(detail.duration_seconds)}</p>
-          {detail.error && <p className="alert">{detail.error}</p>}
           {detail.notice && <p>{detail.notice}</p>}
           {detail.status === "transcribing" && <div role="status">
             <p>文字起こし中：{detail.progress.done} / {detail.progress.total} 区間</p>

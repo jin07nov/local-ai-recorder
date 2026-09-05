@@ -160,6 +160,31 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "interrupted")
         self.assertTrue(result["has_audio"])
 
+    def test_recorder_start_failure_keeps_device_and_alsa_error(self):
+        self.config.device = "plughw:CARD=Device,DEV=0"
+        self.service.recorder_command = [sys.executable, "-u", "-c",
+            "import sys; sys.stderr.write('arecord: audio open error: Device or resource busy'); sys.exit(1)"]
+        record = self.service.start("起動失敗", "ja")
+        self.finish()
+        result = self.service.get(record["id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertFalse(result["has_audio"])
+        self.assertIn("Device or resource busy", result["error"])
+        self.assertIn(self.config.device, result["error"])
+        self.assertEqual(result["recorder_exit_code"], 1)
+
+    def test_large_recorder_error_does_not_block_audio_or_grow_unbounded(self):
+        self.service.recorder_command = [sys.executable, "-u", "-c",
+            "import sys; sys.stderr.write('x' * 131072 + 'CAPTURE_FAILED'); sys.stderr.flush(); "
+            "sys.stdout.buffer.write(bytes(32000)); sys.stdout.buffer.flush(); sys.exit(1)"]
+        record = self.service.start("大量の録音エラー", "ja")
+        self.finish()
+        result = self.service.get(record["id"])
+        self.assertEqual(result["status"], "interrupted")
+        self.assertTrue(result["has_audio"])
+        self.assertIn("CAPTURE_FAILED", result["error"])
+        self.assertLess(len(result["error"]), 5000)
+
     def test_recording_limit_stops_and_preserves_exact_limit(self):
         self.config.max_seconds = 1
         self.recorder(seconds=2)

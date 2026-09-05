@@ -224,7 +224,7 @@ class MeetingService:
             record["audio_device"] = self.config.device
             self._save(record)
             try:
-                self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             except OSError as error:
                 record.update(status="failed", error="マイク録音を開始できませんでした。arecord と音声機器を確認してください。")
                 self._save(record)
@@ -254,6 +254,17 @@ class MeetingService:
         received = 0
         error = None
         carry = b""
+        diagnostics = bytearray()
+
+        def drain_diagnostics():
+            # Drain concurrently so a full stderr pipe cannot stop microphone capture.
+            # Keep only a bounded tail; raw audio is on the separate stdout pipe.
+            while block := process.stderr.read(4096):
+                diagnostics.extend(block)
+                del diagnostics[:-4096]
+
+        diagnostic_thread = threading.Thread(target=drain_diagnostics, daemon=True)
+        diagnostic_thread.start()
         try:
             with (directory / "audio.pcm").open("wb") as output:
                 while True:
@@ -291,12 +302,20 @@ class MeetingService:
                 process.kill()
                 process.wait()
             process.stdout.close()
+            diagnostic_thread.join()
+            process.stderr.close()
+            diagnostic_text = diagnostics.decode("utf-8", errors="replace").strip()
             with self.lock:
                 try:
                     self._finalize_audio(record)
                     record.update(status="interrupted" if error else "recorded", error=error)
                 except Exception as exception:
                     record.update(status="failed", error=str(exception))
+                record["recorder_exit_code"] = process.returncode
+                if record["error"]:
+                    record["error"] += f"\n録音デバイス: {self.config.device}"
+                    if diagnostic_text:
+                        record["error"] += f"\narecord（終了コード {process.returncode}）: {diagnostic_text}"
                 try:
                     self._save(record)
                 finally:

@@ -20,7 +20,7 @@ input, select { min-width: 0; width: 100%; min-height: 42px; border: 1px solid #
 .primary { color: #102c24; background: #80dec0; border-color: #80dec0; font-weight: 650; }
 .stop { background: #71372e; border-color: #e6a494; color: #fff2ee; }
 small { display: block; margin-top: 10px; line-height: 1.6; }
-.alert { background: #3e3024; border: 1px solid #9a7853; color: #ffe1b9; border-radius: 6px; padding: 10px; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.alert { background: #3e3024; border: 1px solid #9a7853; color: #ffe1b9; border-radius: 6px; padding: 10px; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
 .results { margin-top: 20px; }
 h2 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
 .section-heading { margin-bottom: 10px; }
